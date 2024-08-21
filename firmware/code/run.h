@@ -76,6 +76,7 @@ typedef struct _audio_state_config {
         int16_t _target_pcm3060_registers;
     };
     int16_t pcm3060_registers;
+    int8_t interface;
 } audio_state_config;
 extern audio_state_config audio_state;
 
@@ -110,6 +111,8 @@ typedef struct _audio_device_config {
 
 typedef struct _preprocessing_config {
     fix3_28_t preamp;
+    /// @brief Apply this gain after applying EQ, to set output volume without causing overflow in the EQ calculations.
+    fix3_28_t postEQGain;
     int reverse_stereo;
 } preprocessing_config;
 
@@ -137,6 +140,7 @@ static char *descriptor_strings[] = {
 #define SAMPLING_FREQ (CODEC_FREQ / 192)
 
 #define CORE0_READY 19813219
+#define CORE0_ABORTED 91231891
 #define CORE1_READY 72965426
 
 /*****************************************************************************

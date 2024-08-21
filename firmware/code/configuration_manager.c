@@ -54,7 +54,7 @@ static const default_configuration default_config = {
         .filter = { FILTER_CONFIGURATION, sizeof(default_config.filters) },
         .f1  = { PEAKING,    {0},    38.5, -21.0,  1.4  },
         .f2  = { PEAKING,    {0},    60,    -6.7,  0.5  },
-        .f3  = { LOWSHELF,   {0},    105,    5.5,  0.71 },
+        .f3  = { LOWSHELF,   {0},    105,    2.0,  0.71 },
         .f4  = { PEAKING,    {0},    280,   -3.5,  1.1  },
         .f5  = { PEAKING,    {0},    350,   -1.6,  6.0  },
         .f6  = { PEAKING,    {0},    425,    7.8,  1.3  },
@@ -66,9 +66,15 @@ static const default_configuration default_config = {
         .f12 = { PEAKING,    {0},   3430,  -12.2,  2.0  },
         .f13 = { PEAKING,    {0},   4800,    4.0,  2.0  },
         .f14 = { PEAKING,    {0},   6200,  -15.0,  3.0  },
-        .f15 = { HIGHSHELF,  {0},  12000,   -6.0,  0.71 }
+        .f15 = { HIGHSHELF,  {0},  12000,   -3.0,  0.71 }
     },
-    .preprocessing = { .header = { PREPROCESSING_CONFIGURATION, sizeof(default_config.preprocessing) }, -0.08f, true, {0} }
+    .preprocessing = { 
+        .header = { PREPROCESSING_CONFIGURATION, sizeof(default_config.preprocessing) }, 
+        -0.376265f,      // pre-EQ gain of -4.1dB
+        0.4125f,       // post-EQ gain, set to ~3dB (1.4x, less the 1 that is added when config is applied)
+        true, 
+        {0} 
+    }
 };
 
 // Grab the last 4k page of flash for our configuration strutures.
@@ -89,6 +95,13 @@ static uint8_t result_buffer[CFG_BUFFER_SIZE] = { U16_TO_U8S_LE(NOK), U16_TO_U8S
 static bool reload_config = false;
 static uint16_t write_offset = 0;
 static uint16_t read_offset = 0;
+
+typedef enum {
+    NormalOperation,
+    SaveRequested,
+    Saving
+} State;
+static State saveState = NormalOperation;
 
 bool validate_filter_configuration(filter_configuration_tlv *filters)
 {
@@ -316,6 +329,7 @@ bool apply_configuration(tlv_header *config) {
             case PREPROCESSING_CONFIGURATION: {
                 preprocessing_configuration_tlv* preprocessing_config = (preprocessing_configuration_tlv*) tlv;
                 preprocessing.preamp = fix3_28_from_flt(1.0f + preprocessing_config->preamp);
+                preprocessing.postEQGain = fix3_28_from_flt(1.0f + preprocessing_config->postEQGain);
                 preprocessing.reverse_stereo = preprocessing_config->reverse_stereo;
                 break;
             }
@@ -350,32 +364,49 @@ void load_config() {
 }
 
 #ifndef TEST_TARGET
-bool __no_inline_not_in_flash_func(save_configuration)() {
+bool __no_inline_not_in_flash_func(save_config)() {
     const uint8_t active_configuration = inactive_working_configuration ? 0 : 1;
     tlv_header* config = (tlv_header*) working_configuration[active_configuration];
 
-    if (validate_configuration(config)) {
-        power_down_dac();
+    switch (saveState) {
+        case SaveRequested:
+            if (validate_configuration(config)) {      
+                /* Turn the DAC off so we don't make a huge noise when disrupting
+                real time audio operation. */
+                power_down_dac();
 
-        const size_t config_length = config->length - ((size_t)config->value - (size_t)config);
-        // Write data to flash
-        uint8_t flash_buffer[CFG_BUFFER_SIZE];
-        flash_header_tlv* flash_header = (flash_header_tlv*) flash_buffer;
-        flash_header->header.type = FLASH_HEADER;
-        flash_header->header.length = sizeof(flash_header_tlv) + config_length;
-        flash_header->magic = FLASH_MAGIC;
-        flash_header->version = CONFIG_VERSION;
-        memcpy((void*)(flash_header->tlvs), config->value, config_length);
+                const size_t config_length = config->length - ((size_t)config->value - (size_t)config);
+                // Write data to flash
+                uint8_t flash_buffer[CFG_BUFFER_SIZE];
+                flash_header_tlv* flash_header = (flash_header_tlv*) flash_buffer;
+                flash_header->header.type = FLASH_HEADER;
+                flash_header->header.length = sizeof(flash_header_tlv) + config_length;
+                flash_header->magic = FLASH_MAGIC;
+                flash_header->version = CONFIG_VERSION;
+                memcpy((void*)(flash_header->tlvs), config->value, config_length);
 
-        uint32_t ints = save_and_disable_interrupts();
-        flash_range_erase(USER_CONFIGURATION_OFFSET, FLASH_SECTOR_SIZE);
-        flash_range_program(USER_CONFIGURATION_OFFSET, flash_buffer, CFG_BUFFER_SIZE);
-        restore_interrupts(ints);
+                uint32_t ints = save_and_disable_interrupts();
+                flash_range_erase(USER_CONFIGURATION_OFFSET, FLASH_SECTOR_SIZE);
+                flash_range_program(USER_CONFIGURATION_OFFSET, flash_buffer, CFG_BUFFER_SIZE);
+                restore_interrupts(ints);
+                saveState = Saving;
 
-        power_up_dac();
-
-        return true;
+                // Return true, so the caller skips processing audio
+                return true;
+            }
+            // Validation failed, give up.
+            saveState = NormalOperation;
+            break;
+        case Saving:
+            /* Turn the DAC off so we don't make a huge noise when disrupting
+            real time audio operation. */
+            power_up_dac();
+            saveState = NormalOperation;
+            return false;
+        default:
+            break;
     }
+
     return false;
 }
 
@@ -401,7 +432,14 @@ bool process_cmd(tlv_header* cmd) {
             }
             break;
         case SAVE_CONFIGURATION: {
-            if (cmd->length == 4 && save_configuration()) {
+            if (cmd->length == 4) {
+                saveState = SaveRequested;
+                if (audio_state.interface == 0) {
+                    // The OS will configure the alternate "zero" interface when the device is not in use
+                    // in this sate we can write to flash now. Otherwise, defer the save until we get the next
+                    // usb packet.
+                    save_config();
+                }
                 result->type = OK;
                 result->length = 4;
                 return true;
