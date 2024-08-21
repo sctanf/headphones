@@ -124,23 +124,13 @@ static char *descriptor_strings[] = {
 /*****************************************************************************
  * USB-related definitions end here.
  ****************************************************************************/
+#define PICO_AUDIO_I2S_DATA_PIN 18 // DIN
+#define PICO_AUDIO_I2S_CLOCK_PIN_BASE 16 // BCK / LRCK
 
-// I2C pin definitions
-#define PCM3060_SDA_PIN 0
-#define PCM3060_SCL_PIN 1
+#define PCM3060_DAC_SCK_PIN PICO_AUDIO_I2S_CLOCK_PIN_BASE
+#define PCM3060_DAC_WS_PIN (PICO_AUDIO_I2S_CLOCK_PIN_BASE+1)
+#define PCM3060_DAC_SD_PIN PICO_AUDIO_I2S_DATA_PIN
 
-// PCM3060 pin definitions
-#define PCM3060_SCKI2_PIN 19    // a.k.a. DAC SCKI
-#define PCM3060_DAC_SCK_PIN 8   // a.k.a. DAC BCK
-#define PCM3060_DAC_WS_PIN 9    // a.k.a. DAC LRCK
-#define PCM3060_DAC_SD_PIN 12   // a.k.a. DAC DIN
-#define PCM3060_RST_PIN 14      // a.k.a. PCM RESET
-
-#define NEG_SWITCH_PWM_PIN 17
-
-#define AUDIO_POS_SUPPLY_EN_PIN 22
-
-#define PCM_I2C_ADDR 70
 
 #define SYSTEM_FREQ 230400000
 #define CODEC_FREQ 9216000
@@ -150,18 +140,11 @@ static char *descriptor_strings[] = {
 #define CORE1_READY 72965426
 
 /*****************************************************************************
- * DO NOT CHANGE THESE VALUES. YOU COULD BREAK YOUR HARDWARE IF YOU DO!
- ****************************************************************************/
-#define NEG_SWITCH_FREQ 3067000  // 1429000?
-#define NEG_DUTY_NUM 34734       // 37451?
-#define NEG_DUTY_DEN 65536
-/*****************************************************************************
  * /seriousness
  ****************************************************************************/
 
 void core1_entry(void);
 void setup(void);
-void configure_neg_switch_pwm(void);
 
 const char *_get_descriptor_string(uint);
 static void _as_sync_packet(struct usb_endpoint *);

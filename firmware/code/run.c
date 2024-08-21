@@ -90,28 +90,8 @@ int main(void) {
 
 static void update_volume()
 {
-    if (audio_state._volume != audio_state._target_volume) {
-        // PCM3060 volume attenuation:
-        //  0: 0db (default)
-        //  55: -100db
-        //  56..: Mute
-        uint8_t buf[3];
-        buf[0] = 65;    // register addr
-        buf[1] = 255 + (audio_state.target_volume[0] / 128); // data left
-        buf[2] = 255 + (audio_state.target_volume[1] / 128); // data right
-        i2c_write_blocking(i2c0, PCM_I2C_ADDR, buf, 3, false);
-
-        audio_state._volume = audio_state._target_volume;
-    }
-
-    if (audio_state.pcm3060_registers != audio_state._target_pcm3060_registers) {
-        uint8_t buf[3];
-        buf[0] = 68;    // register addr
-        buf[1] = audio_state.target_pcm3060_registers[0]; // Reg 68
-        buf[2] = audio_state.target_pcm3060_registers[1]; // Reg 69
-        i2c_write_blocking(i2c0, PCM_I2C_ADDR, buf, 3, false);
-        audio_state.pcm3060_registers = audio_state._target_pcm3060_registers;
-    }
+    audio_state._volume = audio_state._target_volume;
+    audio_state.pcm3060_registers = audio_state._target_pcm3060_registers;
 }
 
 // Here's the meat. It's where the data buffer from USB gets transformed from
@@ -221,62 +201,6 @@ void setup() {
     pico_get_unique_board_id_string(spi_serial_number, 17);
     descriptor_strings[2] = spi_serial_number;
     userbuf = malloc(sizeof(uint8_t) * RINGBUF_LEN_IN_BYTES);
-    
-    // Configure DAC PWM
-    gpio_set_function(PCM3060_SCKI2_PIN, GPIO_FUNC_PWM);
-    uint slice_num_dac = pwm_gpio_to_slice_num(PCM3060_SCKI2_PIN);
-    uint chan_num_dac = pwm_gpio_to_channel(PCM3060_SCKI2_PIN);
-    pwm_set_phase_correct(slice_num_dac, false);
-    pwm_set_wrap(slice_num_dac, (SYSTEM_FREQ / CODEC_FREQ) - 1);
-    pwm_set_chan_level(slice_num_dac, chan_num_dac, (SYSTEM_FREQ / CODEC_FREQ / 2));
-    pwm_set_enabled(slice_num_dac, true);
-
-    gpio_init(AUDIO_POS_SUPPLY_EN_PIN);
-    gpio_set_dir(AUDIO_POS_SUPPLY_EN_PIN, GPIO_OUT);
-    gpio_put(AUDIO_POS_SUPPLY_EN_PIN, true);
-
-    sleep_ms(100);
-
-    configure_neg_switch_pwm();
-
-    // After negative switching PWM is configured, take the PCM out of reset
-    gpio_init(PCM3060_RST_PIN);
-    gpio_set_dir(PCM3060_RST_PIN, GPIO_OUT);
-    gpio_put(PCM3060_RST_PIN, true);
-
-    // The PCM3060 supports standard mode (100kbps) or fast mode (400kbps)
-    // we run in fast mode so we dont block the core for too long while
-    // updating the volume.
-    i2c_init(i2c0, 400000);
-    gpio_set_function(PCM3060_SDA_PIN, GPIO_FUNC_I2C);
-    gpio_set_function(PCM3060_SCL_PIN, GPIO_FUNC_I2C);
-    gpio_pull_up(PCM3060_SDA_PIN);
-    gpio_pull_up(PCM3060_SCL_PIN);
-
-    // Let the PCM stabilize before power-on
-    sleep_ms(200);
-
-    // Resynchronise clocks. Do not enable PCM yet.
-    uint8_t buf[2];
-    buf[0] = 64; // register addr
-    buf[1] = 0xB0; // data
-    i2c_write_blocking(i2c0, PCM_I2C_ADDR, buf, 2, false);
-
-    // Don't remove this. Don't do it.
-    sleep_ms(200);
-
-    // Enable DAC
-    buf[0] = 64; // register addr
-    buf[1] = 0xE0; // data
-    i2c_write_blocking(i2c0, PCM_I2C_ADDR, buf, 2, false);
-
-    // Same here, pal. Hands off.
-    sleep_ms(100);
-
-    // Set data format to 16 bit right justified, MSB first
-    buf[0] = 67;   // register addr
-    buf[1] = 0x03; // data
-    i2c_write_blocking(i2c0, PCM_I2C_ADDR, buf, 2, false);
 
     i2s_write_obj.sck_pin = PCM3060_DAC_SCK_PIN;
     i2s_write_obj.ws_pin = PCM3060_DAC_WS_PIN;
@@ -285,41 +209,6 @@ void setup() {
 
     i2s_write_init(&i2s_write_obj);
 }
-
-/** **************************************************************************
- * DO. NOT. FUCKING. CHANGE. THIS. FUNCTION.                                 *
- * IF YOU DO, YOU COULD BLOW UP YOUR HARDWARE!                               *
- * YOU WERE WARNED!!!!!!!!!!!!!!!!                                           *
- ****************************************************************************/
- // TODO: roundf will be much faster than round, but it might mess with timings
-void configure_neg_switch_pwm() {
-    gpio_set_function(NEG_SWITCH_PWM_PIN, GPIO_FUNC_PWM);
-    uint slice_num = pwm_gpio_to_slice_num(NEG_SWITCH_PWM_PIN);
-    uint chan_num = pwm_gpio_to_channel(NEG_SWITCH_PWM_PIN);
-    pwm_set_phase_correct(slice_num, false);
-
-    uint16_t wrap = round((float) SYSTEM_FREQ / (float) NEG_SWITCH_FREQ);
-    pwm_set_wrap(slice_num, wrap - 1);
-
-    uint16_t target_level = round((float) SYSTEM_FREQ / (float) NEG_SWITCH_FREQ /
-            (float) NEG_DUTY_DEN * (float) NEG_DUTY_NUM);
-    pwm_set_chan_level(slice_num, chan_num, 0);
-    pwm_set_enabled(slice_num, true);
-    sleep_ms(10);
-
-    // Ramp up the duty cycle.
-    // Seriously, don't fuck with this. A spike on the negative voltage supply
-    // because this isn't ramping correctly will destroy the hardware.
-    size_t i;
-    for(i = 0; i < 200; i++) {
-        uint16_t current_level = round(i * ((float)target_level / 200.0));
-        pwm_set_chan_level(slice_num, chan_num, current_level);
-        sleep_ms(1);
-    }
-}
-
-
-
 
 /*****************************************************************************
  * USB-related code begins here. It's a refactoring nightmare, so here it
@@ -379,7 +268,7 @@ static const audio_device_config ad_conf = {
             .bUnitID = 2,
             .bSourceID = 1,
             .bControlSize = 1,
-            .bmaControls = {
+            .bmaControls = { // Not supported with no i2c device
                 AUDIO_FEATURE_MUTE, // Master channel
                 AUDIO_FEATURE_VOLUME, // Left channel
                 AUDIO_FEATURE_VOLUME, // Right channel
@@ -954,17 +843,9 @@ void usb_sound_card_init() {
 // Some operations will cause popping on the audio output, temporarily
 // disabling the DAC sounds much better.
 void power_down_dac() {
-    uint8_t buf[2];
-    buf[0] = 64; // register addr
-    buf[1] = 0xF0; // DAC low power mode
-    i2c_write_blocking(i2c0, PCM_I2C_ADDR, buf, 2, false);
 }
 
 void power_up_dac() {
-    uint8_t buf[2];
-    buf[0] = 64; // register addr
-    buf[1] = 0xE0; // DAC normal mode
-    i2c_write_blocking(i2c0, PCM_I2C_ADDR, buf, 2, false);
 }
 
 /*****************************************************************************
